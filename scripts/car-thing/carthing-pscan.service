@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Bluetooth page scan enabled so the Nocturne Connector can reconnect
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+# pscan only, deliberately NOT piscan: page scan makes this device connectable
+# to the Connector, which already knows its address. Inquiry scan would also
+# advertise it to anyone in range, which it does not need.
+ExecStart=/usr/bin/hciconfig hci0 pscan

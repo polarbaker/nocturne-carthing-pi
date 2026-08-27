@@ -1,0 +1,35 @@
+# Nothing in this repo should ever contain a secret, a firmware blob, or a
+# device dump. The entries below are the three classes deliberately kept out.
+
+# 1. Firmware and vendor binaries — redistribution is not ours to grant, and
+#    they are ~700MB anyway. Fetch them from the upstream project.
+*.img
+*.img.gz
+*.zip
+images/
+tools/
+flashthing-cli
+superbird-tool
+
+# 2. Device dumps — eMMC partition images and /var tarballs pulled off the Car
+#    Thing. These can contain the previous install's Spotify tokens, Wi-Fi PSK
+#    and account state. Never commit them.
+backup/
+partitions/
+*.tar.gz
+*.bin
+*.ext4
+
+# 3. Live credentials and machine-local state.
+wpa_supplicant.conf
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+auth-session.json
+setup-state.json
+*.log
+
+# Editor / OS noise
+.DS_Store
+*.swp

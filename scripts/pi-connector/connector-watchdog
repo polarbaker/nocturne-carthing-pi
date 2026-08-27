@@ -1,0 +1,50 @@
+#!/bin/sh
+# Nocturne Connector health watchdog. Run from cron every 5 minutes.
+#
+# Deliberately checks ONLY the Connector's own health, never whether the Car
+# Thing is linked. The Car Thing is often legitimately away (asleep, out of
+# range, carried off) and restarting the Connector for that would cause the
+# very dropouts this is meant to prevent.
+#
+# Logs to /var/log/connector-watchdog.log. Remove the crontab line to disable.
+
+LOG=/var/log/connector-watchdog.log
+say() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >> "$LOG"; }
+
+# Keep the log from growing without bound on a device with no logrotate.
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ]; then
+    tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
+
+# 1. Is the HTTP API answering? Two tries before acting, so a single slow
+#    response during GC or a Spotify reconnect does not trigger a restart.
+ok=0
+for _ in 1 2; do
+    if wget -q -T 10 -O /dev/null http://127.0.0.1/api/info 2>/dev/null; then
+        ok=1; break
+    fi
+    sleep 5
+done
+
+if [ "$ok" -ne 1 ]; then
+    say "api/info unreachable after 2 tries - restarting connector-api"
+    rc-service connector-api restart >> "$LOG" 2>&1
+    sleep 10
+    if wget -q -T 10 -O /dev/null http://127.0.0.1/api/info 2>/dev/null; then
+        say "connector-api recovered"
+    else
+        say "connector-api STILL down after restart - needs a look"
+    fi
+fi
+
+# 2. Is the Bluetooth adapter powered? Without this the Connector runs happily
+#    but can never reach the Car Thing.
+if command -v bluetoothctl >/dev/null 2>&1; then
+    if ! bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+        say "bluetooth adapter not powered - restarting bluetooth"
+        rc-service bluetooth restart >> "$LOG" 2>&1
+        sleep 5
+        rc-service connector-api restart >> "$LOG" 2>&1
+        say "bluetooth + connector-api restarted"
+    fi
+fi

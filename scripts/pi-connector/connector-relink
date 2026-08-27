@@ -1,0 +1,152 @@
+#!/bin/sh
+# Keep the Car Thing RFCOMM link alive. Runs from cron every 5 minutes.
+#
+# ROOT CAUSE this exists for: the Car Thing's Bluetooth adapter comes up
+# "UP RUNNING" with page scan and inquiry scan DISABLED. It therefore answers no
+# pages and appears in no scans, and every Connector attempt times out at exactly
+# 5.12s, forever. Its BlueZ settings already say Discoverable=true /
+# DiscoverableTimeout=0, so something at runtime turns the scans off.
+# `hciconfig hci0 piscan` restores both and the link then connects in ~1.3s.
+#
+# The Car Thing's rootfs is read-only, so this cannot be fixed by a boot unit on
+# that side. Doing it from here over the USB link is the reliable path. Root SSH
+# on the Car Thing requires no authentication, so no key is needed.
+#
+# Order matters: the USB repair runs BEFORE the "is it already retrying?" guard,
+# because those retries can never succeed while page scan is off.
+
+CT=AA:BB:CC:11:22:33
+CTIP=10.42.1.90
+API=http://127.0.0.1
+LOG=/var/log/connector-relink.log
+STAMP=/tmp/.connector-relink-last
+SSHOPT="-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=6"
+
+say() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >> "$LOG"; }
+
+# The Connector re-opens the radio on every start. Close it once the link is up;
+# it is not needed, because the Connector dials OUT to the Car Thing.
+close_radio() {
+    if bluetoothctl show 2>/dev/null | grep -q "Discoverable: yes"; then
+        say "closing discoverable/pairable"
+        bluetoothctl discoverable off >/dev/null 2>&1
+        bluetoothctl pairable off >/dev/null 2>&1
+    fi
+}
+linked() {
+    case "$(wget -q -T 8 -O - "$API/api/device/status" 2>/dev/null)" in
+        *'"connected":true'*) return 0 ;;
+    esac
+    return 1
+}
+
+[ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ] && { tail -n 300 "$LOG" > "$LOG.tmp"; mv "$LOG.tmp" "$LOG"; }
+
+# 1. Already linked? Close the radio down and stop.
+#
+#    The Connector hardcodes setDiscoverable(true) + setPairable(true) with
+#    timeout 0 on every startup (services/bluetooth-service.ts:176-177), leaving
+#    Pi C permanently visible and pairable to anyone in RF range -- a nearby
+#    iPhone hit its PairingAgent once already. Patching the vendor source would
+#    be undone by the next OTA, so undo it here instead: once the link is up,
+#    neither flag is needed, because the Connector dials OUT to the Car Thing.
+#    Worst case it is exposed for one cron interval after a Connector restart.
+#    Uses /api/device/status. NOT /api/bluetooth/connections, which reports
+#    {"connections":[]} even while the link is up and carrying RPC.
+if linked; then
+    close_radio
+    exit 0
+fi
+
+# 2. Try a plain connect by address FIRST. This is the cheap path and it needs
+#    no USB, no discovery, and no bond -- BlueZ will page the address directly.
+#    Verified working with usb0 down and the Car Thing in pscan-only mode (not
+#    discoverable), which is the whole basis for running the two boxes apart.
+#    It only fails when the Car Thing's radio is genuinely not listening, which
+#    is what the USB repair below is for.
+wget -q -T 25 -O /dev/null --post-data='' "$API/api/bluetooth/connect/$CT" 2>/dev/null
+sleep 4
+if linked; then say "relink OK via direct connect"; close_radio; exit 0; fi
+
+# 3. USB repair path. Cheap, idempotent, and fixes the actual root cause.
+#
+#    First make sure the link is actually up. `allow-hotplug usb0` does NOT fire
+#    when the Car Thing is already attached at boot -- the interface is created
+#    but left DOWN with qdisc noop, so the whole repair path silently vanishes
+#    exactly when it is needed most (after a reboot). Bring it up here instead of
+#    depending on boot ordering.
+if ip link show usb0 >/dev/null 2>&1; then
+    if ! ip -4 addr show usb0 2>/dev/null | grep -q "inet "; then
+        say "usb0 down but gadget present - bringing it up"
+        ip link set usb0 up 2>/dev/null
+        sleep 2
+        udhcpc -i usb0 -n -q -t 4 -T 2 >/dev/null 2>&1
+        sleep 1
+    fi
+fi
+
+if ping -c1 -W2 "$CTIP" >/dev/null 2>&1; then
+    flags=$(ssh $SSHOPT "root@$CTIP" 'hciconfig hci0 | sed -n 3p' 2>/dev/null)
+    case "$flags" in
+        *PSCAN*)
+            : ;;
+        *)
+            say "Car Thing radio not connectable (flags:$flags) - enabling piscan"
+            ssh $SSHOPT "root@$CTIP" 'hciconfig hci0 piscan' >/dev/null 2>&1
+            sleep 2 ;;
+    esac
+    wget -q -T 25 -O /dev/null --post-data='' "$API/api/bluetooth/connect/$CT" 2>/dev/null
+    sleep 5
+    if linked; then say "relink OK via USB path"; close_radio; exit 0; fi
+fi
+
+# 4. Is the Connector already retrying, and is that retry getting
+#    anywhere? Stand down only while retries are recent AND the failure streak is
+#    short -- once paging has clearly stopped working, scanning is worth a try.
+#    Log stamps are UTC ("...T19:33:59.888Z") but busybox `date -d` parses local,
+#    so use -u or every comparison lands hours out.
+if [ -f /var/log/connector-api.log ]; then
+    fails=$(awk '/RFCOMM connected to/{n=0} /RFCOMM reconnect failed/{n++} END{print n+0}' \
+            /var/log/connector-api.log)
+    last_try=$(grep "Connecting RFCOMM to $CT" /var/log/connector-api.log 2>/dev/null \
+               | tail -1 | sed -n 's/^\[\([0-9T:-]*\)\..*/\1/p')
+    if [ -n "$last_try" ]; then
+        t=$(date -u -D "%Y-%m-%dT%H:%M:%S" -d "$last_try" +%s 2>/dev/null || echo 0)
+        age=$(( $(date +%s) - t ))
+        if [ "$t" -gt 0 ] && [ "$age" -lt 120 ] && [ "$fails" -lt 10 ]; then
+            exit 0
+        fi
+    fi
+fi
+
+# 5. Rate limit the scan path: scanning makes this adapter discoverable, so keep
+#    it occasional rather than continuous.
+now=$(date +%s)
+if [ -f "$STAMP" ]; then
+    last=$(cat "$STAMP" 2>/dev/null || echo 0)
+    [ $(( now - last )) -lt 900 ] && exit 0
+fi
+echo "$now" > "$STAMP"
+
+say "no link, no USB - rediscovering $CT over the air"
+wget -q -T 8 -O /dev/null --post-data='' "$API/api/bluetooth/scan" 2>/dev/null
+found=0; i=0
+while [ $i -lt 8 ]; do
+    sleep 5
+    case "$(wget -q -T 8 -O - "$API/api/bluetooth/devices" 2>/dev/null)" in
+        *"$CT"*) found=1; break ;;
+    esac
+    i=$((i+1))
+done
+wget -q -T 8 -O /dev/null --post-data='' "$API/api/bluetooth/stop-scan" 2>/dev/null
+
+if [ "$found" -ne 1 ]; then
+    say "not discoverable - powered off, asleep, or radio scans disabled with no USB to fix it"
+    exit 0
+fi
+
+wget -q -T 20 -O /dev/null --post-data='' "$API/api/bluetooth/trust/$CT" 2>/dev/null
+wget -q -T 25 -O /dev/null --post-data='' "$API/api/bluetooth/connect/$CT" 2>/dev/null
+sleep 5
+if linked; then say "relink OK via scan path"; close_radio
+else say "connect attempted, no link yet - will retry"; fi

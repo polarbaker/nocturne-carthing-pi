@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-assert Bluetooth page scan periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

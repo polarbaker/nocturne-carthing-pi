@@ -1,0 +1,84 @@
+#!/usr/sbin/nft -f
+#
+# Nocturne Connector (Pi C) firewall
+# Goal: only the Car Thing (usb0) and the admin machine may reach this host.
+#
+# Admin machine: admin-pi  10.0.0.216  mac AA:BB:CC:77:88:99
+# The MAC rule is the durable one -- it survives a DHCP lease change.
+
+define ADMIN_IP  = 10.0.0.216
+define ADMIN_MAC = AA:BB:CC:77:88:99
+define CARTHING  = 172.16.42.2
+
+flush ruleset
+
+table ip filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iif lo accept
+        ct state established,related accept
+        ct state invalid drop
+
+        # Car Thing over the USB-gadget link: full access to the Connector.
+        iifname "usb0" accept
+
+        # Admin machine: dashboard (80) + SSH (22), by IP and by MAC.
+        ip saddr $ADMIN_IP  tcp dport { 22, 80 } ct state new accept
+        ether saddr $ADMIN_MAC tcp dport { 22, 80 } ct state new accept
+
+        # Ping from the admin machine only, so discovery still works.
+        ip saddr $ADMIN_IP  icmp type echo-request accept
+        ether saddr $ADMIN_MAC icmp type echo-request accept
+
+        # Everything else on the LAN is dropped silently.
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state established,related accept
+        ct state invalid drop
+
+        # Car Thing -> internet (Spotify, NTP, artwork).
+        iifname "usb0" oifname "wlan0" ip saddr 172.16.42.0/24 ct state new accept
+
+        # Admin machine -> Car Thing adb (22) and DevTools (9222), post-DNAT.
+        ip saddr $ADMIN_IP  ip daddr $CARTHING tcp dport { 22, 9222 } ct state new accept
+        ether saddr $ADMIN_MAC ip daddr $CARTHING tcp dport { 22, 9222 } ct state new accept
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        # Car Thing passthrough, admin machine only. Previously these were
+        # open to the whole LAN, which exposed the Car Thing's DevTools port.
+        iifname "wlan0" ip saddr $ADMIN_IP tcp dport 2022 dnat to $CARTHING:22
+        iifname "wlan0" ip saddr $ADMIN_IP tcp dport 2222 dnat to $CARTHING:9222
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "wlan0" masquerade
+    }
+}
+
+# No global IPv6 on this host, but the Connector binds :: -- close the
+# link-local path too. ICMPv6 stays open so neighbour discovery works.
+table ip6 filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iif lo accept
+        ct state established,related accept
+        meta l4proto ipv6-icmp accept
+        iifname "usb0" accept
+    }
+    chain forward { type filter hook forward priority filter; policy drop; }
+    chain output  { type filter hook output  priority filter; policy accept; }
+}
