@@ -1,0 +1,137 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Nocturne lock screen + weather</title>
+<style>
+  /* The panel is 800x480 landscape, fixed. No responsive units anywhere -
+     the window never resizes, so vw/vh only add indirection. */
+  html, body {
+    margin: 0; width: 800px; height: 480px;
+    overflow: hidden; overscroll-behavior: none;
+    background: #000; color: #fff;
+    font-family: Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  * { -webkit-tap-highlight-color: transparent; }
+
+  /* Approximates Nocturne's album-art gradient so the preview reads the way
+     the real lock screen does. On device this is already painted by the UI. */
+  .bg {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(120% 90% at 18% 12%, #2b4a6f 0%, transparent 55%),
+      radial-gradient(110% 90% at 85% 80%, #6d3b52 0%, transparent 55%),
+      #07090c;
+  }
+
+  .stage {
+    position: relative; height: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 6px;
+  }
+
+  /* Matches LockView: text-[20vw] at 800px = 160px, font-semibold,
+     tracking-tight, leading-none. Kept identical so it looks native. */
+  .clock {
+    font-size: 160px; font-weight: 600;
+    letter-spacing: -0.025em; line-height: 1;
+    font-variant-numeric: tabular-nums; /* stops the layout jittering each minute */
+  }
+
+  .date { font-size: 22px; font-weight: 500; color: rgba(255,255,255,.62); letter-spacing: .01em; }
+
+  .wx {
+    margin-top: 18px;
+    display: flex; align-items: center; gap: 18px;
+    font-variant-numeric: tabular-nums;
+  }
+  .wx svg { width: 46px; height: 46px; display: block; }
+  .temp { font-size: 46px; font-weight: 600; line-height: 1; }
+  .cond { font-size: 19px; color: rgba(255,255,255,.72); text-transform: lowercase; }
+  .hilo { font-size: 19px; color: rgba(255,255,255,.72); }
+  .hilo .lo { color: rgba(255,255,255,.42); }
+  .sep { width: 1px; height: 34px; background: rgba(255,255,255,.18); }
+
+  /* Shown only when the data is old enough to be worth doubting. Never
+     blank the screen on a failed fetch - stale but honest beats empty. */
+  .stale { font-size: 13px; color: rgba(255,255,255,.38); margin-top: 10px; }
+</style>
+
+<div class="bg"></div>
+<div class="stage">
+  <div class="clock" id="clock">11:15</div>
+  <div class="date" id="date">Friday, August 28</div>
+
+  <div class="wx">
+    <span id="icon"></span>
+    <span class="temp" id="temp">81°</span>
+    <span class="sep"></span>
+    <span class="cond" id="cond">overcast</span>
+    <span class="sep"></span>
+    <span class="hilo"><span id="hi">85°</span> <span class="lo" id="lo">69°</span></span>
+  </div>
+  <div class="stale" id="stale" hidden></div>
+</div>
+
+<script>
+// Inline SVG, deliberately not emoji: the Nocturne image strips locale paks and
+// drops noto-sans-cjk, so colour emoji are likely to render as tofu boxes.
+// Eight shapes cover every WMO bucket, cost nothing to load, and scale cleanly.
+const S = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+const SUN   = S('<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>');
+const MOON  = S('<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z"/>');
+const PCLD  = S('<circle cx="8.5" cy="8" r="3.1"/><path d="M8.5 1.9v1.4M2.5 8H3.9M4.3 3.8l1 1M12.7 3.8l-1 1"/><path d="M17.5 20H8a3.6 3.6 0 0 1 0-7.2 4.8 4.8 0 0 1 9.2 1.1 3 3 0 0 1 .3 6.1z"/>');
+const CLOUD = S('<path d="M17.5 19H7.5a4 4 0 0 1 0-8 5.3 5.3 0 0 1 10.2 1.2 3.4 3.4 0 0 1-.2 6.8z"/>');
+const FOG   = S('<path d="M17.5 14H7.5a4 4 0 0 1 0-8 5.3 5.3 0 0 1 10.2 1.2A3.4 3.4 0 0 1 17.5 14z"/><path d="M4 18h16M6 21.5h12"/>');
+const RAIN  = S('<path d="M17.5 15H7.5a4 4 0 0 1 0-8 5.3 5.3 0 0 1 10.2 1.2 3.4 3.4 0 0 1-.2 6.8z"/><path d="M9 18.2l-.8 2.4M13 18.2l-.8 2.4M17 18.2l-.8 2.4"/>');
+const SNOW  = S('<path d="M17.5 15H7.5a4 4 0 0 1 0-8 5.3 5.3 0 0 1 10.2 1.2 3.4 3.4 0 0 1-.2 6.8z"/><path d="M9 19h.01M12.5 21h.01M16 19h.01M12.5 18h.01"/>');
+const STORM = S('<path d="M17.5 14H7.5a4 4 0 0 1 0-8 5.3 5.3 0 0 1 10.2 1.2 3.4 3.4 0 0 1-.2 6.8z"/><path d="M13 16l-3 4h4l-3 4"/>');
+
+// WMO buckets. Freezing drizzle (56/57) and freezing rain (66/67) get their own
+// wording rather than collapsing into plain rain - that distinction is the one
+// that actually matters when you're deciding whether to go outside.
+function wmo(code, isDay) {
+  if (code === 0)  return [isDay ? SUN : MOON, isDay ? 'clear' : 'clear night'];
+  if (code <= 2)   return [PCLD,  'partly cloudy'];
+  if (code === 3)  return [CLOUD, 'overcast'];
+  if (code <= 48)  return [FOG,   'fog'];
+  if (code <= 55)  return [RAIN,  'drizzle'];
+  if (code <= 57)  return [SNOW,  'freezing drizzle'];
+  if (code <= 65)  return [RAIN,  'rain'];
+  if (code <= 67)  return [SNOW,  'freezing rain'];
+  if (code <= 77)  return [SNOW,  'snow'];
+  if (code <= 82)  return [RAIN,  'showers'];
+  if (code <= 86)  return [SNOW,  'snow showers'];
+  if (code <= 94)  return [STORM, 'thunderstorm'];
+  return [STORM, 'thunderstorm, hail'];
+}
+
+// --- preview data: a real Open-Meteo response fetched 2026-08-28 11:15 ---
+const DATA = {
+  temp: 81.3, code: 3, isDay: 1, hi: 84.6, lo: 69.0,
+  fetchedAt: '2026-08-28T11:15'
+};
+
+function render(d) {
+  const [icon, label] = wmo(d.code, d.isDay);
+  document.getElementById('icon').innerHTML = icon;
+  document.getElementById('temp').textContent = Math.round(d.temp) + '°';
+  document.getElementById('cond').textContent = label;
+  document.getElementById('hi').textContent  = Math.round(d.hi) + '°';
+  document.getElementById('lo').textContent  = Math.round(d.lo) + '°';
+}
+
+function tick() {
+  const n = new Date();
+  let h = n.getHours(); const m = String(n.getMinutes()).padStart(2, '0');
+  h = h % 12 || 12;                       // 12-hour, matching the Nocturne default
+  document.getElementById('clock').textContent = `${h}:${m}`;
+  document.getElementById('date').textContent =
+    n.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+}
+
+render(DATA);
+tick();
+setInterval(tick, 10000);
+</script>

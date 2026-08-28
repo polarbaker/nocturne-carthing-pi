@@ -22,6 +22,8 @@ documented as prominently as the things that worked.
 | `scripts/pi-connector/` | Watchdog, relink helper, nftables ruleset |
 | `scripts/car-thing/` | systemd units for the Car Thing itself |
 | `scripts/pihole-nocturne-allowlist.sh` | Allowlists the domains Nocturne needs |
+| `scripts/weather/` | Weather on the lock screen - overlay, Pi-side fetcher, installer |
+| `docs/WEATHER-OVERLAY.md` | How that works and what silently deletes it |
 
 ## Findings worth the click
 
@@ -49,6 +51,26 @@ scan is enabled. The correlation everyone repeats is coincidence.
 **Test a Pi-hole block by differencing against upstream**, never in isolation. A
 domain resolving through Pi-hole does not prove filtering is off, and NXDOMAIN
 from both Pi-hole and upstream means the name simply does not exist.
+
+## Adding weather to the lock screen
+
+`scripts/weather/` adds temperature, conditions and today's high/low under
+Nocturne's existing lock-screen clock, without forking the UI. Data reaches the
+device over the **existing Bluetooth link** - the daemon passes unknown event
+topics through untouched, so no daemon change is needed.
+
+Traps found building it, all of which fail silently:
+
+- **The daemon drops RPC requests whose `id` is not a UUID.** No error, no
+  response, nothing logged. `crypto.randomUUID()` works; anything else vanishes.
+- **A `MutationObserver` on `document.body` `{subtree:true}` stalls the device** -
+  Nocturne mutates several times a second and an unthrottled observer drove load
+  high enough that CDP itself stopped answering. Poll instead.
+- **`pointer-events: none` is mandatory** - the lock screen owns swipe-to-skip and
+  tap-to-play, and an interactive overlay eats them while still looking correct.
+- **Ask for data more than once** - after a device reboot the page loads before
+  Bluetooth is up, the first request fails, and one attempt leaves a blank panel.
+- **Keep injected JS pure ASCII** - `atob()` turns a UTF-8 `°` into `Â°`.
 
 ## Reliability model
 
