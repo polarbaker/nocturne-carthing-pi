@@ -83,6 +83,13 @@ not enough: after a device reboot the page loads before the Bluetooth link is up
 the request fails with "No active app session", and the panel stays blank until
 the next 15-minute push. The overlay now retries every 30 s until it has data.
 
+**The device's system clock is UTC - never use `new Date()` for anything the
+user sees.** Nocturne's clock only looks right because `LockView` pulls local
+time from the Pi via `device.time.get`. An overlay calling `new Date()` renders
+UTC, which shows **tomorrow's date every evening after 8pm EDT**. The Pi now
+sends Open-Meteo's `utc_offset_seconds` in the payload and the overlay shifts by
+it, which also handles DST for free since the offset is recomputed each fetch.
+
 **Darkening the background needs `z-index: 5`, not a higher value.** The app's
 content lives in a stacking context at `z-10` and `GradientBackground` paints
 below it, so a body-level scrim at 5 lands *between* them - darkening the album

@@ -16,6 +16,20 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 262144 ]; then
     tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
 
+# 0. Cap the Connector's own log. Nothing rotates it - logrotate is not even
+#    installed on this image - and it grows ~190KB/day on a 973MB root
+#    filesystem, faster when the Bluetooth link flaps and fills it with
+#    reconnect lines. Truncate IN PLACE: the Connector holds the file open, so
+#    moving or deleting it would leave the daemon writing to a lost inode and
+#    the log would silently stop.
+APILOG=/var/log/connector-api.log
+if [ -f "$APILOG" ] && [ "$(wc -c < "$APILOG")" -gt 4194304 ]; then
+    tail -n 2000 "$APILOG" > "$APILOG.trim" 2>/dev/null &&
+        cat "$APILOG.trim" > "$APILOG" &&
+        say "trimmed connector-api.log (was over 4MB)"
+    rm -f "$APILOG.trim"
+fi
+
 # 1. Is the HTTP API answering? Two tries before acting, so a single slow
 #    response during GC or a Spotify reconnect does not trigger a restart.
 ok=0

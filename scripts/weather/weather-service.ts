@@ -28,6 +28,12 @@ export type WeatherPayload = {
   high: number;
   low: number;
   unit: "F" | "C";
+  /** UTC offset in seconds for the weather LOCATION, straight from Open-Meteo
+   *  (timezone=auto). The Car Thing's own system clock runs in UTC - Nocturne's
+   *  UI only looks right because it pulls local time from the Pi over RPC. So
+   *  the overlay cannot use new Date() for anything user-visible; it derives
+   *  local time from this. Also handles DST, since Open-Meteo recomputes it. */
+  utcOffsetSeconds: number;
   /** Epoch ms when this reading was actually fetched, NOT when it was sent.
    *  The overlay uses it to mark data stale rather than showing a wrong
    *  temperature confidently. Re-broadcasts keep the original timestamp. */
@@ -80,6 +86,7 @@ export class WeatherService {
         high,
         low,
         unit: TEMPERATURE_UNIT === "celsius" ? "C" : "F",
+        utcOffsetSeconds: Number(j.utc_offset_seconds ?? 0),
         fetchedAt: Date.now(),
       };
       log.info(`Weather ${Math.round(temp)}° code=${this.last.code} hi=${Math.round(high)} lo=${Math.round(low)}`);

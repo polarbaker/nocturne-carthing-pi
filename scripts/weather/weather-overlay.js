@@ -96,12 +96,26 @@
   ].join(";");
   document.body.appendChild(el);
 
+  // Shift an epoch time by the location's UTC offset, then format in UTC - the
+  // standard trick for rendering a specific timezone without a tz database.
+  function fmtLocal(epochMs, opts, kind) {
+    var off = last && typeof last.utcOffsetSeconds === "number" ? last.utcOffsetSeconds : 0;
+    var d = new Date(epochMs + off * 1000);
+    var o = {};
+    for (var k in opts) o[k] = opts[k];
+    o.timeZone = "UTC";
+    return kind === "time" ? d.toLocaleTimeString(undefined, o) : d.toLocaleDateString(undefined, o);
+  }
+
   function render() {
     if (!last) { el.innerHTML = ""; return; }
     var w = wmo(Number(last.code) || 0, last.isDay !== 0);
     var stale = last.fetchedAt && (Date.now() - last.fetchedAt > STALE_MS);
-    var d = new Date();
-    var date = d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    // The device's system clock runs in UTC. Nocturne's clock only looks correct
+    // because LockView pulls local time from the Pi via device.time.get. So
+    // new Date() here would render UTC - which shows TOMORROW's date every
+    // evening after 8pm EDT. Derive local time from the offset the Pi sends.
+    var date = fmtLocal(Date.now(), { weekday: "long", month: "long", day: "numeric" }, "date");
     var dim = "rgba(255,255,255,.42)", soft = "rgba(255,255,255,.72)";
 
     el.innerHTML =
@@ -116,7 +130,7 @@
           '<span style="color:' + dim + '">' + Math.round(last.low) + '\u00b0</span></span>' +
       '</div>' +
       (stale ? '<div style="font-size:12px;color:' + dim + ';margin-top:10px">weather unavailable \u2014 last reading ' +
-                new Date(last.fetchedAt).toLocaleTimeString(undefined, {hour:"numeric",minute:"2-digit"}) + '</div>' : "");
+                fmtLocal(last.fetchedAt, {hour:"numeric",minute:"2-digit"}, "time") + '</div>' : "");
   }
 
   // --- when to show ------------------------------------------------------
@@ -144,7 +158,7 @@
     scrim.style.display = "block";
     // Only rebuild the DOM when something actually changed. Re-rendering at the
     // poll rate would cause needless layout work on a device with a 192MB heap.
-    var sig = [last.fetchedAt, last.temp, last.code, last.isDay, new Date().toDateString(),
+    var sig = [last.fetchedAt, last.temp, last.code, last.isDay, fmtLocal(Date.now(), { weekday:"short", month:"short", day:"numeric" }, "date"),
                Date.now() - last.fetchedAt > STALE_MS].join("|");
     if (sig !== lastSig) { render(); lastSig = sig; }
     el.style.display = "block";
